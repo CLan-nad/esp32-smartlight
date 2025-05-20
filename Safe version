@@ -1,0 +1,110 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <ESP32Servo.h>
+
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define SERVO_PIN 13
+#define STATIC_PIN 123456  // 自定义6位静态配对码
+
+Servo myservo;
+bool deviceConnected = false;
+BLEServer* pServer = nullptr;
+BLECharacteristic* pChar = nullptr;
+
+// ==================== BLE安全认证回调 ====================
+class MySecurityCallbacks : public BLESecurityCallbacks {
+    uint32_t onPassKeyRequest() {
+        Serial.println("手机请求配对码");
+        return STATIC_PIN; // 返回静态配对码
+    }
+
+    void onPassKeyNotify(uint32_t pass_key) {
+        Serial.printf("设备配对码: %d\n", pass_key); // 显示配对码（可选）
+    }
+
+    bool onSecurityRequest() {
+        Serial.println("安全请求已接收");
+        return true; // 接受安全请求
+    }
+
+    void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
+        if (cmpl.success) {
+            Serial.println("配对成功，通信已加密");
+        } else {
+            Serial.println("配对失败");
+        }
+    }
+};
+
+// ==================== 舵机控制回调 ====================
+class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) {
+        std::string value = pChar->getValue();
+        if (value == "OFF") {
+            myservo.write(100); delay(1000);
+            myservo.write(50);  delay(1000);
+            myservo.write(10);  delay(1000);
+            myservo.write(50);
+            Serial.println("执行关灯动作");
+        }
+    }
+};
+
+// ==================== 服务器连接回调 ====================
+class MyServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        deviceConnected = true;
+        Serial.println("客户端已连接");
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+        deviceConnected = false;
+        Serial.println("客户端已断开");
+        // 断开后重新广播
+        pServer->getAdvertising()->start();
+    }
+};
+
+void setup() {
+    Serial.begin(115200);
+    myservo.attach(SERVO_PIN);
+    myservo.write(50); // 初始化舵机位置
+
+    // 初始化BLE设备
+    BLEDevice::init("SmartLight_BLE");
+
+    // ===== 安全配置 =====
+    BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM); // 启用加密和MITM保护
+    BLESecurity *pSecurity = new BLESecurity();
+    pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_MITM_BOND); // 要求配对和绑定
+    pSecurity->setStaticPIN(STATIC_PIN);                         // 设置静态配对码
+    BLEDevice::setSecurityCallbacks(new MySecurityCallbacks());  // 注册安全回调
+    // ===================
+
+    // 创建BLE服务器
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    // 创建服务和特征
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+    pChar = pService->createCharacteristic(
+        CHARACTERISTIC_UUID,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    pChar->setCallbacks(new MyCharacteristicCallbacks());
+    pService->start();
+
+    // 开始广播
+    pServer->getAdvertising()->start();
+    Serial.println("BLE已启动，等待配对（配对码: " + String(STATIC_PIN) + ")");
+}
+
+void loop() {
+    // 保持连接管理
+    if (!deviceConnected) {
+        delay(500); // 防止频繁重启广播
+    }
+    delay(1000);
+}
